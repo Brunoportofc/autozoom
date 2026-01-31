@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
-import { Monitor, StopCircle, Video, Dock } from "lucide-react";
+import { Monitor, StopCircle } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 declare global {
@@ -14,8 +14,23 @@ declare global {
     }
 }
 
+// Recording data type (Video + Events)
+export interface RecordingData {
+    videoBlob: Blob;
+    events: MouseEvent[];
+    screenWidth: number;
+    screenHeight: number;
+}
+
+export interface MouseEvent {
+    type: 'mousemove' | 'mousedown' | 'mouseup' | 'keydown';
+    time: number; // Time in seconds since recording start
+    x: number; // Percentage (0-100)
+    y: number; // Percentage (0-100)
+}
+
 interface ScreenRecorderProps {
-    onRecordingComplete?: (blob: Blob) => void;
+    onRecordingComplete?: (data: RecordingData) => void;
 }
 
 export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
@@ -25,6 +40,12 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const chunksRef = useRef<Blob[]>([]);
 
+    // Event capture state
+    const eventsRef = useRef<MouseEvent[]>([]);
+    const startTimeRef = useRef<number>(0);
+    const removeListenerRef = useRef<(() => void) | null>(null);
+    const screenDimensionsRef = useRef({ width: 1920, height: 1080 }); // Default, will be updated
+
     // Electron specific state
     const [isElectron, setIsElectron] = useState(false);
     const [showSourceSelector, setShowSourceSelector] = useState(false);
@@ -32,6 +53,13 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
 
     useEffect(() => {
         setIsElectron(!!window.electron);
+        // Try to get screen dimensions
+        if (typeof window !== 'undefined') {
+            screenDimensionsRef.current = {
+                width: window.screen.width,
+                height: window.screen.height
+            };
+        }
     }, []);
 
     const startRecording = async () => {
@@ -41,7 +69,7 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
                 setDesktopSources(sources);
                 setShowSourceSelector(true);
             } else {
-                // Browser Mode
+                // Browser Mode (No event capture)
                 const displayStream = await navigator.mediaDevices.getDisplayMedia({
                     video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: 60 },
                     audio: false
@@ -62,9 +90,9 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
                     mandatory: {
                         chromeMediaSource: 'desktop',
                         chromeMediaSourceId: sourceId,
-                        minWidth: 1280,
+                        minWidth: 1920,
                         maxWidth: 3840,
-                        minHeight: 720,
+                        minHeight: 1080,
                         maxHeight: 2160
                     }
                 }
@@ -91,21 +119,56 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
         mediaRecorderRef.current = mediaRecorder;
         chunksRef.current = [];
 
+        // === EVENT CAPTURE SETUP ===
+        eventsRef.current = [];
+        startTimeRef.current = Date.now();
+
+        if (window.electron) {
+            console.log("🎯 Starting event capture...");
+            removeListenerRef.current = window.electron.onGlobalEvent((event) => {
+                // Normalize time to seconds since recording start
+                const timeInSeconds = (Date.now() - startTimeRef.current) / 1000;
+
+                // Normalize coordinates to percentages
+                const xPercent = (event.eventData.x / screenDimensionsRef.current.width) * 100;
+                const yPercent = (event.eventData.y / screenDimensionsRef.current.height) * 100;
+
+                const normalizedEvent: MouseEvent = {
+                    type: event.type,
+                    time: timeInSeconds,
+                    x: Math.max(0, Math.min(100, xPercent)),
+                    y: Math.max(0, Math.min(100, yPercent)),
+                };
+
+                eventsRef.current.push(normalizedEvent);
+            });
+        }
+
         mediaRecorder.ondataavailable = (event) => {
             if (event.data.size > 0) chunksRef.current.push(event.data);
         };
 
         mediaRecorder.onstop = () => {
-            const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-            if (onRecordingComplete) {
-                onRecordingComplete(blob);
-            } else {
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'recording.webm';
-                a.click();
+            // Stop listening to events
+            if (removeListenerRef.current) {
+                removeListenerRef.current();
+                removeListenerRef.current = null;
             }
+
+            const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+
+            console.log(`📊 Captured ${eventsRef.current.length} events`);
+
+            // Pass both video AND events to the editor
+            if (onRecordingComplete) {
+                onRecordingComplete({
+                    videoBlob: blob,
+                    events: eventsRef.current,
+                    screenWidth: screenDimensionsRef.current.width,
+                    screenHeight: screenDimensionsRef.current.height
+                });
+            }
+
             setStream(null);
             setIsRecording(false);
         };
@@ -171,7 +234,7 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
                 {isRecording && (
                     <div className="absolute top-4 right-4 flex items-center gap-2 bg-destructive text-destructive-foreground px-3 py-1 rounded-full text-sm font-medium animate-pulse z-10">
                         <div className="w-2 h-2 rounded-full bg-white" />
-                        Recording
+                        Recording ({eventsRef.current.length} events)
                     </div>
                 )}
             </div>
@@ -191,7 +254,7 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
             </div>
 
             <p className="text-xs text-muted-foreground mt-4 max-w-md text-center">
-                {isElectron ? "Running in Electron Mode (Native Quality)" : "Running in Browser Mode (Limited Capabilities)"}
+                {isElectron ? "✨ Electron Mode: Native quality + Mouse tracking enabled" : "⚠️ Browser Mode: Limited capabilities"}
             </p>
         </div>
     );
