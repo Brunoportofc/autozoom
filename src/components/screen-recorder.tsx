@@ -1,0 +1,198 @@
+"use client";
+
+import React, { useState, useRef, useEffect } from 'react';
+import { Button } from "@/components/ui/button";
+import { Monitor, StopCircle, Video, Dock } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+
+declare global {
+    interface Window {
+        electron?: {
+            getDesktopSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
+            onGlobalEvent: (callback: (event: any) => void) => () => void;
+        };
+    }
+}
+
+interface ScreenRecorderProps {
+    onRecordingComplete?: (blob: Blob) => void;
+}
+
+export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
+    const [stream, setStream] = useState<MediaStream | null>(null);
+    const [isRecording, setIsRecording] = useState(false);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const chunksRef = useRef<Blob[]>([]);
+
+    // Electron specific state
+    const [isElectron, setIsElectron] = useState(false);
+    const [showSourceSelector, setShowSourceSelector] = useState(false);
+    const [desktopSources, setDesktopSources] = useState<Array<{ id: string; name: string; thumbnail: string }>>([]);
+
+    useEffect(() => {
+        setIsElectron(!!window.electron);
+    }, []);
+
+    const startRecording = async () => {
+        try {
+            if (isElectron && window.electron) {
+                const sources = await window.electron.getDesktopSources();
+                setDesktopSources(sources);
+                setShowSourceSelector(true);
+            } else {
+                // Browser Mode
+                const displayStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: 60 },
+                    audio: false
+                });
+                handleStreamSuccess(displayStream);
+            }
+        } catch (err) {
+            console.error("Error starting screen capture:", err);
+        }
+    };
+
+    const handleSourceSelection = async (sourceId: string) => {
+        setShowSourceSelector(false);
+        try {
+            const constraints: any = {
+                audio: false,
+                video: {
+                    mandatory: {
+                        chromeMediaSource: 'desktop',
+                        chromeMediaSourceId: sourceId,
+                        minWidth: 1280,
+                        maxWidth: 3840,
+                        minHeight: 720,
+                        maxHeight: 2160
+                    }
+                }
+            };
+            const displayStream = await navigator.mediaDevices.getUserMedia(constraints);
+            handleStreamSuccess(displayStream);
+        } catch (err) {
+            console.error("Failed to get electron stream", err);
+        }
+    };
+
+    const handleStreamSuccess = (displayStream: MediaStream) => {
+        setStream(displayStream);
+        if (videoRef.current) {
+            videoRef.current.srcObject = displayStream;
+        }
+
+        displayStream.getVideoTracks()[0].onended = () => stopRecording();
+
+        const mediaRecorder = new MediaRecorder(displayStream, {
+            mimeType: 'video/webm;codecs=vp9'
+        });
+
+        mediaRecorderRef.current = mediaRecorder;
+        chunksRef.current = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) chunksRef.current.push(event.data);
+        };
+
+        mediaRecorder.onstop = () => {
+            const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+            if (onRecordingComplete) {
+                onRecordingComplete(blob);
+            } else {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'recording.webm';
+                a.click();
+            }
+            setStream(null);
+            setIsRecording(false);
+        };
+
+        mediaRecorder.start();
+        setIsRecording(true);
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            mediaRecorderRef.current.stop();
+        }
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+    };
+
+    return (
+        <div className="flex flex-col items-center gap-4 w-full max-w-4xl mx-auto">
+            {/* Source Selector Dialog */}
+            <Dialog open={showSourceSelector} onOpenChange={setShowSourceSelector}>
+                <DialogContent className="max-w-3xl">
+                    <DialogHeader>
+                        <DialogTitle>Select Screen to Record</DialogTitle>
+                        <DialogDescription>Choose a screen or window to start recording</DialogDescription>
+                    </DialogHeader>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 max-h-[60vh] overflow-y-auto p-2">
+                        {desktopSources.map((source) => (
+                            <div
+                                key={source.id}
+                                className="flex flex-col gap-2 p-2 border rounded-lg hover:border-primary cursor-pointer transition-colors group"
+                                onClick={() => handleSourceSelection(source.id)}
+                            >
+                                <div className="aspect-video bg-muted rounded overflow-hidden relative">
+                                    <img src={source.thumbnail} alt={source.name} className="w-full h-full object-contain" />
+                                    <div className="absolute inset-0 bg-primary/10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                        <div className="bg-primary text-primary-foreground px-3 py-1 rounded-full text-xs font-bold shadow-lg">Select</div>
+                                    </div>
+                                </div>
+                                <span className="text-xs font-medium truncate px-1" title={source.name}>{source.name}</span>
+                            </div>
+                        ))}
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <div className="w-full aspect-video bg-black/10 rounded-lg overflow-hidden border border-border relative flex items-center justify-center group">
+                {stream ? (
+                    <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-contain bg-black"
+                    />
+                ) : (
+                    <div className="text-muted-foreground flex flex-col items-center gap-2">
+                        <Monitor className="w-12 h-12 opacity-50" />
+                        <p>Preview will appear here</p>
+                    </div>
+                )}
+
+                {isRecording && (
+                    <div className="absolute top-4 right-4 flex items-center gap-2 bg-destructive text-destructive-foreground px-3 py-1 rounded-full text-sm font-medium animate-pulse z-10">
+                        <div className="w-2 h-2 rounded-full bg-white" />
+                        Recording
+                    </div>
+                )}
+            </div>
+
+            <div className="flex gap-4">
+                {!isRecording ? (
+                    <Button onClick={startRecording} size="lg" className="gap-2 shadow-lg hover:shadow-xl transition-all">
+                        <Monitor className="w-4 h-4" />
+                        {isElectron ? "Select Native Source" : "Start Browser Recording"}
+                    </Button>
+                ) : (
+                    <Button onClick={stopRecording} variant="destructive" size="lg" className="gap-2 shadow-lg">
+                        <StopCircle className="w-4 h-4" />
+                        Stop Recording
+                    </Button>
+                )}
+            </div>
+
+            <p className="text-xs text-muted-foreground mt-4 max-w-md text-center">
+                {isElectron ? "Running in Electron Mode (Native Quality)" : "Running in Browser Mode (Limited Capabilities)"}
+            </p>
+        </div>
+    );
+}
