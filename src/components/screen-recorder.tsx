@@ -63,6 +63,14 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
     }, []);
 
     const startRecording = async () => {
+        // Refresh dimensions in case window moved
+        if (typeof window !== 'undefined') {
+            screenDimensionsRef.current = {
+                width: window.screen.width,
+                height: window.screen.height
+            };
+        }
+
         try {
             if (isElectron && window.electron) {
                 const sources = await window.electron.getDesktopSources();
@@ -71,7 +79,11 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
             } else {
                 // Browser Mode (No event capture)
                 const displayStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: 60 },
+                    video: {
+                        width: { ideal: 1920, max: 1920 },
+                        height: { ideal: 1080, max: 1080 },
+                        frameRate: 60
+                    },
                     audio: false
                 });
                 handleStreamSuccess(displayStream);
@@ -129,9 +141,13 @@ export function ScreenRecorder({ onRecordingComplete }: ScreenRecorderProps) {
                 // Normalize time to seconds since recording start
                 const timeInSeconds = (Date.now() - startTimeRef.current) / 1000;
 
+                const dpr = window.devicePixelRatio || 1;
+                const screenW = screenDimensionsRef.current.width * dpr;
+                const screenH = screenDimensionsRef.current.height * dpr;
+
                 // Normalize coordinates to percentages
-                const xPercent = (event.eventData.x / screenDimensionsRef.current.width) * 100;
-                const yPercent = (event.eventData.y / screenDimensionsRef.current.height) * 100;
+                const xPercent = (event.eventData.x / screenW) * 100;
+                const yPercent = (event.eventData.y / screenH) * 100;
 
                 const normalizedEvent: MouseEvent = {
                     type: event.type,
